@@ -1,8 +1,6 @@
 import { z } from 'zod';
-import { config } from '../utils/config.js';
-import { createModuleLogger } from '../utils/logger.js';
-
-const logger = createModuleLogger('todoist-service');
+import { config } from '../utils/config';
+import { appLogger } from '../utils/logger';
 
 /**
  * Zod schemas for Todoist API responses
@@ -144,7 +142,7 @@ export class TodoistService {
     const startTime = Date.now();
 
     try {
-      logger.debug(`Making request to ${options.method || 'GET'} ${endpoint}`);
+      appLogger.debug(`Making request to ${options.method || 'GET'} ${endpoint}`);
 
       const response = await fetch(url, {
         ...options,
@@ -158,12 +156,12 @@ export class TodoistService {
       const status = response.status;
 
       // Log the API call
-      logger.todoistApi(
-        options.method || 'GET',
+      appLogger.info('Todoist API call', {
+        method: options.method || 'GET',
         endpoint,
         status,
-        { duration_ms: duration }
-      );
+        duration_ms: duration
+      });
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -183,7 +181,7 @@ export class TodoistService {
           return schema.parse(data);
         } catch (error) {
           if (error instanceof z.ZodError) {
-            logger.error('Response validation failed', {
+            appLogger.error('Response validation failed', {
               endpoint,
               errors: error.errors.slice(0, 5), // Log only first 5 errors to avoid spam
               total_errors: error.errors.length,
@@ -191,7 +189,7 @@ export class TodoistService {
             });
             
             // Log a warning but don't fail - return the raw data
-            logger.warn(`Schema validation failed for ${endpoint}, using raw response`);
+            appLogger.warn(`Schema validation failed for ${endpoint}, using raw response`);
             return data as T;
           }
           throw error;
@@ -201,11 +199,12 @@ export class TodoistService {
       return data as T;
     } catch (error) {
       const duration = Date.now() - startTime;
-      logger.errorWithContext(
-        error as Error,
-        `Todoist API request to ${endpoint}`,
-        { duration_ms: duration, endpoint, method: options.method || 'GET' }
-      );
+      appLogger.error('Todoist API request failed', {
+        error: error instanceof Error ? error.message : error,
+        duration_ms: duration,
+        endpoint,
+        method: options.method || 'GET'
+      });
       throw error;
     }
   }
@@ -345,10 +344,12 @@ export class TodoistService {
   async healthCheck(): Promise<boolean> {
     try {
       await this.getProjects();
-      logger.info('Todoist service health check passed');
+      appLogger.info('Todoist service health check passed');
       return true;
     } catch (error) {
-      logger.errorWithContext(error as Error, 'Todoist service health check');
+      appLogger.error('Todoist service health check failed', {
+        error: error instanceof Error ? error.message : error
+      });
       return false;
     }
   }
@@ -366,7 +367,9 @@ export class TodoistService {
         tasks_count: tasks.length,
       };
     } catch (error) {
-      logger.errorWithContext(error as Error, 'Getting account info');
+      appLogger.error('Failed to get account info', {
+        error: error instanceof Error ? error.message : error
+      });
       throw error;
     }
   }
