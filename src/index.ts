@@ -4,7 +4,7 @@
  * Entry point for the Express REST API server
  */
 
-import './types/global'; // Import global types first
+// ❌ REMOVED: import './types/global'; // This line caused the runtime error
 import { config } from './utils/config';
 import { appLogger } from './utils/logger';
 import { createExpressServer } from './server/express-server';

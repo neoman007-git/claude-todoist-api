@@ -28,13 +28,10 @@ const TaskSchema = z.object({
   due: z.object({
     date: z.string(),
     is_recurring: z.boolean(),
-    datetime: z.string().nullable().optional(), // Can be missing or null
+    datetime: z.string().nullable(),
     string: z.string(),
-    timezone: z.string().nullable().optional(), // Can be missing or null
-    lang: z.string().optional(), // This field can also be missing
+    timezone: z.string().nullable(),
   }).nullable(),
-  duration: z.any().nullable().optional(), // Duration can be present in some responses
-  deadline: z.any().nullable().optional(), // Deadline can be present in some responses
 });
 
 // Project schema - represents a Todoist project
@@ -106,44 +103,36 @@ export class TodoistApiError extends Error {
   }
 }
 
-export class TodoistValidationError extends Error {
-  constructor(message: string, public errors: z.ZodError) {
-    super(message);
-    this.name = 'TodoistValidationError';
-  }
-}
-
 /**
- * Todoist API Service
- * Handles all interactions with the Todoist REST API
+ * TodoistService - Direct REST API client for Todoist
+ * This service handles all interactions with the Todoist REST API
  */
 export class TodoistService {
-  private readonly apiKey: string;
   private readonly baseUrl = 'https://api.todoist.com/rest/v2';
-  private readonly headers: HeadersInit;
+  private readonly headers: Record<string, string>;
 
-  constructor(apiKey?: string) {
-    this.apiKey = apiKey || config.TODOIST_API_KEY;
+  constructor() {
     this.headers = {
-      'Authorization': `Bearer ${this.apiKey}`,
+      'Authorization': `Bearer ${config.TODOIST_API_KEY}`,
       'Content-Type': 'application/json',
     };
   }
 
   /**
-   * Generic API request method with error handling and logging
+   * Make a request to the Todoist API
    */
   private async makeRequest<T>(
     endpoint: string, 
-    options: RequestInit = {},
-    schema?: z.ZodSchema<T>
+    options: RequestInit = {}
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
-    const startTime = Date.now();
+    
+    appLogger.debug(`Making request to: ${url}`, {
+      method: options.method || 'GET',
+      endpoint
+    });
 
     try {
-      appLogger.debug(`Making request to ${options.method || 'GET'} ${endpoint}`);
-
       const response = await fetch(url, {
         ...options,
         headers: {
@@ -152,68 +141,83 @@ export class TodoistService {
         },
       });
 
-      const duration = Date.now() - startTime;
-      const status = response.status;
-
-      // Log the API call
-      appLogger.info('Todoist API call', {
-        method: options.method || 'GET',
-        endpoint,
-        status,
-        duration_ms: duration
-      });
-
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
+        const errorText = await response.text();
+        appLogger.error(`API request failed: ${response.status} ${response.statusText}`, {
+          endpoint,
+          status: response.status,
+          error: errorText
+        });
+        
         throw new TodoistApiError(
-          `Todoist API error: ${response.statusText}`,
-          status,
-          errorData.error_code,
-          errorData
+          `API request failed: ${response.statusText}`,
+          response.status,
+          response.status.toString(),
+          errorText
         );
       }
 
       const data = await response.json();
-
-      // Validate response if schema provided
-      if (schema) {
-        try {
-          return schema.parse(data);
-        } catch (error) {
-          if (error instanceof z.ZodError) {
-            appLogger.error('Response validation failed', {
-              endpoint,
-              errors: error.errors.slice(0, 5), // Log only first 5 errors to avoid spam
-              total_errors: error.errors.length,
-              sample_response: Array.isArray(data) ? data.slice(0, 2) : data
-            });
-            
-            // Log a warning but don't fail - return the raw data
-            appLogger.warn(`Schema validation failed for ${endpoint}, using raw response`);
-            return data as T;
-          }
-          throw error;
-        }
-      }
-
-      return data as T;
+      appLogger.debug(`API request successful`, { endpoint, responseSize: JSON.stringify(data).length });
+      
+      return data;
     } catch (error) {
-      const duration = Date.now() - startTime;
-      appLogger.error('Todoist API request failed', {
-        error: error instanceof Error ? error.message : error,
-        duration_ms: duration,
+      if (error instanceof TodoistApiError) {
+        throw error;
+      }
+      
+      appLogger.error(`Network error during API request`, {
         endpoint,
-        method: options.method || 'GET'
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
-      throw error;
+      
+      throw new TodoistApiError(
+        `Network error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        0,
+        'NETWORK_ERROR',
+        error
+      );
     }
   }
 
   /**
-   * Task Management Methods
+   * Health check method for API status monitoring
    */
+  async healthCheck(): Promise<{ connected: boolean; projects: number; tasks: number }> {
+    try {
+      appLogger.info('Testing Todoist API connectivity...');
+      
+      // Get basic info to test connection
+      const [projects, tasks] = await Promise.all([
+        this.getProjects(),
+        this.getTasks()
+      ]);
 
-  async getTasks(params?: {
+      const result = {
+        connected: true,
+        projects: projects.length,
+        tasks: tasks.length
+      };
+
+      appLogger.info('Todoist API connectivity test successful', result);
+      return result;
+    } catch (error) {
+      appLogger.error('Todoist API connectivity test failed', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      
+      return {
+        connected: false,
+        projects: 0,
+        tasks: 0
+      };
+    }
+  }
+
+  /**
+   * Get all tasks - supports both string filter and object options
+   */
+  async getTasks(options?: string | {
     project_id?: string;
     section_id?: string;
     label?: string;
@@ -221,159 +225,171 @@ export class TodoistService {
     lang?: string;
     ids?: string[];
   }): Promise<Task[]> {
-    const searchParams = new URLSearchParams();
+    let endpoint = '/tasks';
     
-    if (params?.project_id) searchParams.set('project_id', params.project_id);
-    if (params?.section_id) searchParams.set('section_id', params.section_id);
-    if (params?.label) searchParams.set('label', params.label);
-    if (params?.filter) searchParams.set('filter', params.filter);
-    if (params?.lang) searchParams.set('lang', params.lang);
-    if (params?.ids) searchParams.set('ids', params.ids.join(','));
-
-    const query = searchParams.toString();
-    const endpoint = `/tasks${query ? `?${query}` : ''}`;
-
-    return this.makeRequest(endpoint, {}, z.array(TaskSchema));
-  }
-
-  async getTask(taskId: string): Promise<Task> {
-    return this.makeRequest(`/tasks/${taskId}`, {}, TaskSchema);
-  }
-
-  async createTask(task: CreateTaskInput): Promise<Task> {
-    // Validate input
-    const validatedTask = CreateTaskSchema.parse(task);
-
-    return this.makeRequest('/tasks', {
-      method: 'POST',
-      body: JSON.stringify(validatedTask),
-    }, TaskSchema);
-  }
-
-  async updateTask(taskId: string, updates: UpdateTaskInput): Promise<Task> {
-    // Validate input
-    const validatedUpdates = UpdateTaskSchema.parse(updates);
-
-    return this.makeRequest(`/tasks/${taskId}`, {
-      method: 'POST',
-      body: JSON.stringify(validatedUpdates),
-    }, TaskSchema);
-  }
-
-  async closeTask(taskId: string): Promise<boolean> {
-    await this.makeRequest(`/tasks/${taskId}/close`, { method: 'POST' });
-    return true;
-  }
-
-  async reopenTask(taskId: string): Promise<boolean> {
-    await this.makeRequest(`/tasks/${taskId}/reopen`, { method: 'POST' });
-    return true;
-  }
-
-  async deleteTask(taskId: string): Promise<boolean> {
-    await this.makeRequest(`/tasks/${taskId}`, { method: 'DELETE' });
-    return true;
+    if (typeof options === 'string') {
+      // Simple filter string
+      endpoint = `/tasks?filter=${encodeURIComponent(options)}`;
+    } else if (options && typeof options === 'object') {
+      // Build query parameters from object
+      const params = new URLSearchParams();
+      
+      if (options.project_id) params.append('project_id', options.project_id);
+      if (options.section_id) params.append('section_id', options.section_id);
+      if (options.label) params.append('label', options.label);
+      if (options.filter) params.append('filter', options.filter);
+      if (options.lang) params.append('lang', options.lang);
+      if (options.ids && options.ids.length > 0) {
+        params.append('ids', options.ids.join(','));
+      }
+      
+      const queryString = params.toString();
+      if (queryString) {
+        endpoint = `/tasks?${queryString}`;
+      }
+    }
+    
+    const tasks = await this.makeRequest<any[]>(endpoint);
+    return tasks.map(task => TaskSchema.parse(task));
   }
 
   /**
-   * Project Management Methods
+   * Get a specific task by ID
    */
+  async getTask(taskId: string): Promise<Task> {
+    const task = await this.makeRequest<any>(`/tasks/${taskId}`);
+    return TaskSchema.parse(task);
+  }
 
+  /**
+   * Create a new task
+   */
+  async createTask(taskData: CreateTaskInput): Promise<Task> {
+    const validatedData = CreateTaskSchema.parse(taskData);
+    const task = await this.makeRequest<any>('/tasks', {
+      method: 'POST',
+      body: JSON.stringify(validatedData),
+    });
+    
+    appLogger.info('Task created successfully', { 
+      taskId: task.id, 
+      content: task.content 
+    });
+    
+    return TaskSchema.parse(task);
+  }
+
+  /**
+   * Update an existing task
+   */
+  async updateTask(taskId: string, updates: UpdateTaskInput): Promise<Task> {
+    const validatedUpdates = UpdateTaskSchema.parse(updates);
+    const task = await this.makeRequest<any>(`/tasks/${taskId}`, {
+      method: 'POST',
+      body: JSON.stringify(validatedUpdates),
+    });
+    
+    appLogger.info('Task updated successfully', { 
+      taskId, 
+      updates: Object.keys(validatedUpdates) 
+    });
+    
+    return TaskSchema.parse(task);
+  }
+
+  /**
+   * Complete a task (alias for closeTask)
+   */
+  async completeTask(taskId: string): Promise<void> {
+    await this.closeTask(taskId);
+  }
+
+  /**
+   * Close/complete a task
+   */
+  async closeTask(taskId: string): Promise<void> {
+    await this.makeRequest(`/tasks/${taskId}/close`, {
+      method: 'POST',
+    });
+    
+    appLogger.info('Task closed/completed successfully', { taskId });
+  }
+
+  /**
+   * Reopen a completed task
+   */
+  async reopenTask(taskId: string): Promise<void> {
+    await this.makeRequest(`/tasks/${taskId}/reopen`, {
+      method: 'POST',
+    });
+    
+    appLogger.info('Task reopened successfully', { taskId });
+  }
+
+  /**
+   * Delete a task
+   */
+  async deleteTask(taskId: string): Promise<void> {
+    await this.makeRequest(`/tasks/${taskId}`, {
+      method: 'DELETE',
+    });
+    
+    appLogger.info('Task deleted successfully', { taskId });
+  }
+
+  /**
+   * Get all projects
+   */
   async getProjects(): Promise<Project[]> {
-    return this.makeRequest('/projects', {}, z.array(ProjectSchema));
+    const projects = await this.makeRequest<any[]>('/projects');
+    return projects.map(project => ProjectSchema.parse(project));
   }
 
+  /**
+   * Get a specific project by ID
+   */
   async getProject(projectId: string): Promise<Project> {
-    return this.makeRequest(`/projects/${projectId}`, {}, ProjectSchema);
+    const project = await this.makeRequest<any>(`/projects/${projectId}`);
+    return ProjectSchema.parse(project);
   }
 
+  /**
+   * Create a new project - supports options object
+   */
   async createProject(name: string, options?: {
     parent_id?: string;
     color?: string;
     is_favorite?: boolean;
   }): Promise<Project> {
-    return this.makeRequest('/projects', {
+    const projectData: any = { name };
+    
+    if (options) {
+      if (options.parent_id) projectData.parent_id = options.parent_id;
+      if (options.color) projectData.color = options.color;
+      if (options.is_favorite !== undefined) projectData.is_favorite = options.is_favorite;
+    }
+    
+    const project = await this.makeRequest<any>('/projects', {
       method: 'POST',
-      body: JSON.stringify({ name, ...options }),
-    }, ProjectSchema);
-  }
-
-  async updateProject(projectId: string, updates: {
-    name?: string;
-    color?: string;
-    is_favorite?: boolean;
-  }): Promise<Project> {
-    return this.makeRequest(`/projects/${projectId}`, {
-      method: 'POST',
-      body: JSON.stringify(updates),
-    }, ProjectSchema);
-  }
-
-  async deleteProject(projectId: string): Promise<boolean> {
-    await this.makeRequest(`/projects/${projectId}`, { method: 'DELETE' });
-    return true;
+      body: JSON.stringify(projectData),
+    });
+    
+    appLogger.info('Project created successfully', { 
+      projectId: project.id, 
+      name: project.name 
+    });
+    
+    return ProjectSchema.parse(project);
   }
 
   /**
-   * Label Management Methods
+   * Get all labels
    */
-
   async getLabels(): Promise<Label[]> {
-    return this.makeRequest('/labels', {}, z.array(LabelSchema));
-  }
-
-  async getLabel(labelId: string): Promise<Label> {
-    return this.makeRequest(`/labels/${labelId}`, {}, LabelSchema);
-  }
-
-  async createLabel(name: string, options?: {
-    order?: number;
-    color?: string;
-    is_favorite?: boolean;
-  }): Promise<Label> {
-    return this.makeRequest('/labels', {
-      method: 'POST',
-      body: JSON.stringify({ name, ...options }),
-    }, LabelSchema);
-  }
-
-  /**
-   * Utility Methods
-   */
-
-  async healthCheck(): Promise<boolean> {
-    try {
-      await this.getProjects();
-      appLogger.info('Todoist service health check passed');
-      return true;
-    } catch (error) {
-      appLogger.error('Todoist service health check failed', {
-        error: error instanceof Error ? error.message : error
-      });
-      return false;
-    }
-  }
-
-  async getAccountInfo(): Promise<{ is_premium: boolean; projects_count: number; tasks_count: number }> {
-    try {
-      const [projects, tasks] = await Promise.all([
-        this.getProjects(),
-        this.getTasks()
-      ]);
-
-      return {
-        is_premium: true, // We'd need to call a different endpoint for this
-        projects_count: projects.length,
-        tasks_count: tasks.length,
-      };
-    } catch (error) {
-      appLogger.error('Failed to get account info', {
-        error: error instanceof Error ? error.message : error
-      });
-      throw error;
-    }
+    const labels = await this.makeRequest<any[]>('/labels');
+    return labels.map(label => LabelSchema.parse(label));
   }
 }
 
-// Export a default instance
+// Export a singleton instance
 export const todoistService = new TodoistService();
