@@ -1,9 +1,9 @@
-import express from 'express';
+import express, { Request, Response, NextFunction, Application } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import { config } from '../utils/config';
 import { appLogger } from '../utils/logger';
-import { TodoistService } from '../services/todoist.service';
+import { todoistService } from '../services/todoist.service';
 
 // Import route handlers
 import { createTaskRoutes } from '../routes/tasks';
@@ -11,181 +11,193 @@ import { createProjectRoutes } from '../routes/projects';
 import { createLabelRoutes } from '../routes/labels';
 import { createHealthRoutes } from '../routes/health';
 
-export class ExpressServer {
-  private app: express.Application;
-  private todoistService: TodoistService;
+// Type definitions for consistent error handling
+interface ApiError extends Error {
+  statusCode?: number;
+  code?: string;
+}
 
-  constructor() {
-    this.app = express();
-    this.todoistService = new TodoistService(config.TODOIST_API_KEY);
-    this.setupMiddleware();
-    this.setupRoutes();
-    this.setupErrorHandling();
-  }
+interface ErrorResponse {
+  error: string;
+  message?: string;
+  details?: string;
+  timestamp: string;
+  path: string;
+}
 
-  private setupMiddleware(): void {
-    // Security middleware
-    this.app.use(helmet());
+/**
+ * Create Express application with all middleware and routes
+ */
+export async function createExpressServer(): Promise<Application> {
+  const app: Application = express();
+
+  // Trust proxy for accurate IP addresses when behind load balancer
+  app.set('trust proxy', 1);
+
+  // Security middleware
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "https:"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+  }));
+
+  // CORS configuration
+  app.use(cors({
+    origin: config.NODE_ENV === 'production' ? false : true, // Restrict in production
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+  }));
+
+  // Body parsing middleware
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+  // Request logging middleware
+  app.use((req: Request, res: Response, next: NextFunction): void => {
+    const start = Date.now();
     
-    // CORS configuration - Allow Claude API and local development
-    this.app.use(cors({
-      origin: [
-        'https://claude.ai',
-        'https://api.anthropic.com',
-        'http://localhost:3000',
-        'http://localhost:8000'
-      ],
-      credentials: true,
-      methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key']
-    }));
-
-    // Body parsing middleware
-    this.app.use(express.json({ limit: '10mb' }));
-    this.app.use(express.urlencoded({ extended: true }));
-
-    // Request logging
-    this.app.use((req, res, next) => {
+    res.on('finish', () => {
+      const duration = Date.now() - start;
       appLogger.info('HTTP Request', {
         method: req.method,
         path: req.path,
+        status: res.statusCode,
+        duration_ms: duration,
         ip: req.ip,
         userAgent: req.get('User-Agent')
       });
-      next();
     });
-  }
+    
+    next();
+  });
 
-  private setupRoutes(): void {
-    // API routes
-    this.app.use('/api/tasks', createTaskRoutes(this.todoistService));
-    this.app.use('/api/projects', createProjectRoutes(this.todoistService));
-    this.app.use('/api/labels', createLabelRoutes(this.todoistService));
-    this.app.use('/health', createHealthRoutes(this.todoistService));
-
-    // Root endpoint with API documentation
-    this.app.get('/', (req, res) => {
-      res.json({
-        name: 'Claude Todoist API',
-        version: '1.0.0',
-        description: 'REST API for Claude AI to manage Todoist tasks and projects',
-        endpoints: {
-          health: '/health',
-          tasks: {
-            list: 'GET /api/tasks',
-            create: 'POST /api/tasks',
-            update: 'PATCH /api/tasks/:id',
-            complete: 'POST /api/tasks/:id/complete',
-            reopen: 'POST /api/tasks/:id/reopen',
-            delete: 'DELETE /api/tasks/:id'
-          },
-          projects: {
-            list: 'GET /api/projects',
-            create: 'POST /api/projects'
-          },
-          labels: 'GET /api/labels'
+  // Root endpoint - API documentation
+  app.get('/', (req: Request, res: Response): void => {
+    res.json({
+      name: config.MCP_SERVER_NAME,
+      version: config.MCP_SERVER_VERSION,
+      description: 'REST API server enabling Claude AI to manage Todoist tasks, projects, and labels',
+      environment: config.NODE_ENV,
+      endpoints: {
+        health: {
+          'GET /health': 'Comprehensive health check with Todoist connectivity',
+          'GET /health/simple': 'Simple health check for load balancers',
+          'GET /health/ready': 'Readiness probe for orchestrators'
         },
-        documentation: 'https://github.com/neoman007-git/claude-todoist-api'
-      });
+        tasks: {
+          'GET /api/tasks': 'List tasks with optional filtering',
+          'POST /api/tasks': 'Create a new task',
+          'PATCH /api/tasks/:id': 'Update an existing task',
+          'POST /api/tasks/:id/complete': 'Mark task as completed',
+          'POST /api/tasks/:id/reopen': 'Reopen a completed task',
+          'DELETE /api/tasks/:id': 'Delete a task'
+        },
+        projects: {
+          'GET /api/projects': 'List all projects',
+          'POST /api/projects': 'Create a new project'
+        },
+        labels: {
+          'GET /api/labels': 'List all labels'
+        }
+      },
+      documentation: 'https://github.com/neoman007-git/claude-todoist-api'
+    });
+  });
+
+  // API routes - pass todoistService instance to each route creator
+  app.use('/health', createHealthRoutes(todoistService));
+  app.use('/api/tasks', createTaskRoutes(todoistService));
+  app.use('/api/projects', createProjectRoutes(todoistService));
+  app.use('/api/labels', createLabelRoutes(todoistService));
+
+  // 404 handler
+  app.use((req: Request, res: Response): void => {
+    res.status(404).json({
+      error: 'Not Found',
+      message: `Route ${req.method} ${req.path} not found`,
+      timestamp: new Date().toISOString(),
+      path: req.path
+    } satisfies ErrorResponse);
+  });
+
+  // Global error handler
+  app.use((error: ApiError, req: Request, res: Response, next: NextFunction): void => {
+    // Log the error
+    appLogger.error('Express error handler', {
+      error: error.message,
+      stack: error.stack,
+      path: req.path,
+      method: req.method,
+      statusCode: error.statusCode
     });
 
-    // 404 handler
-    this.app.use('*', (req, res) => {
-      res.status(404).json({
-        error: 'Not Found',
-        message: `Route ${req.method} ${req.originalUrl} not found`,
-        availableEndpoints: [
-          'GET /',
-          'GET /health',
-          'GET /api/tasks',
-          'POST /api/tasks',
-          'GET /api/projects',
-          'POST /api/projects'
-        ]
-      });
-    });
-  }
+    // Determine status code
+    const statusCode = error.statusCode || 500;
+    
+    // Don't expose internal errors in production
+    const message = config.NODE_ENV === 'production' && statusCode >= 500
+      ? 'Internal Server Error'
+      : error.message;
 
-  private setupErrorHandling(): void {
-    // Global error handler
-    this.app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-      appLogger.error('Express Error', {
-        error: err.message,
-        stack: err.stack,
-        path: req.path,
-        method: req.method
-      });
+    const errorResponse: ErrorResponse = {
+      error: message,
+      timestamp: new Date().toISOString(),
+      path: req.path
+    };
 
-      const status = err.status || err.statusCode || 500;
-      const message = err.message || 'Internal Server Error';
-
-      res.status(status).json({
-        error: status >= 500 ? 'Internal Server Error' : message,
-        ...(config.NODE_ENV === 'development' && { 
-          details: err.message,
-          stack: err.stack 
-        })
-      });
-    });
-  }
-
-  public async start(): Promise<void> {
-    try {
-      // Perform health checks before starting
-      appLogger.info('🏥 Performing startup health checks...');
-      
-      // Test Todoist connection
-      const projects = await this.todoistService.getProjects();
-      const tasks = await this.todoistService.getTasks();
-      
-      appLogger.info('✅ Todoist API connection verified', {
-        projects_count: projects.length,
-        tasks_count: tasks.length
-      });
-
-      // Start HTTP server
-      const port = config.PORT || 3000;
-      
-      this.app.listen(port, () => {
-        appLogger.info('🚀 Claude Todoist API Server started', {
-          port,
-          environment: config.NODE_ENV,
-          endpoints: {
-            root: `http://localhost:${port}/`,
-            health: `http://localhost:${port}/health`,
-            tasks: `http://localhost:${port}/api/tasks`,
-            projects: `http://localhost:${port}/api/projects`
-          }
-        });
-
-        appLogger.info('🧰 Available API endpoints:', {
-          tasks: [
-            'GET /api/tasks - List tasks',
-            'POST /api/tasks - Create task', 
-            'PATCH /api/tasks/:id - Update task',
-            'POST /api/tasks/:id/complete - Complete task',
-            'POST /api/tasks/:id/reopen - Reopen task',
-            'DELETE /api/tasks/:id - Delete task'
-          ],
-          projects: [
-            'GET /api/projects - List projects',
-            'POST /api/projects - Create project'
-          ],
-          other: [
-            'GET /api/labels - List labels',
-            'GET /health - Health check',
-            'GET / - API documentation'
-          ]
-        });
-      });
-
-    } catch (error) {
-      appLogger.error('❌ Failed to start server', { error });
-      process.exit(1);
+    // Add details in development
+    if (config.NODE_ENV === 'development') {
+      errorResponse.details = error.stack;
     }
+
+    res.status(statusCode).json(errorResponse);
+  });
+
+  // Initialize services and verify connectivity
+  try {
+    appLogger.info('Initializing Todoist service...');
+    const healthStatus = await todoistService.healthCheck();
+    
+    if (!healthStatus) {
+      appLogger.warn('Todoist service health check failed during startup');
+      // Continue anyway - health endpoints will show the issue
+    } else {
+      appLogger.info('Todoist service initialized successfully');
+    }
+  } catch (error) {
+    appLogger.error('Failed to initialize Todoist service', {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    // Continue anyway - health endpoints will show the issue
   }
 
-  public getApp(): express.Application {
-    return this.app;
-  }
+  return app;
+}
+
+// Graceful shutdown handler
+export function setupGracefulShutdown(server: any): void {
+  const shutdown = (signal: string): void => {
+    appLogger.info(`Received ${signal}, shutting down gracefully`);
+    
+    server.close(() => {
+      appLogger.info('HTTP server closed');
+      process.exit(0);
+    });
+
+    // Force close after 30 seconds
+    setTimeout(() => {
+      appLogger.error('Could not close connections in time, forcefully shutting down');
+      process.exit(1);
+    }, 30000);
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

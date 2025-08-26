@@ -1,77 +1,78 @@
-import { z } from 'zod';
-import dotenv from 'dotenv';
+import { config as dotenvConfig } from 'dotenv';
 
-// Load environment variables from .env file
-dotenv.config();
-
-/**
- * Configuration schema using Zod for runtime validation
- * Similar to Pydantic models in Python - validates and transforms data at runtime
- */
-const ConfigSchema = z.object({
-  // Environment settings
-  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
-  PORT: z.coerce.number().min(1000).max(65535).default(3000),
-  
-  // Todoist API settings
-  TODOIST_API_KEY: z.string().min(10, 'Todoist API key must be at least 10 characters'),
-  
-  // MCP Server settings
-  MCP_SERVER_NAME: z.string().default('claude-todoist-mcp'),
-  MCP_SERVER_VERSION: z.string().default('1.0.0'),
-  
-  // Logging settings
-  LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
-  
-  // Optional: Rate limiting settings for future use
-  RATE_LIMIT_MAX: z.coerce.number().default(100),
-  RATE_LIMIT_WINDOW_MS: z.coerce.number().default(15 * 60 * 1000), // 15 minutes
-});
+// Load environment variables
+dotenvConfig();
 
 /**
- * Parse and validate configuration from environment variables
- * This approach ensures type safety and catches configuration errors early
+ * Configuration interface ensuring all required values exist
  */
-function loadConfig() {
-  try {
-    // Parse environment variables against our schema
-    const config = ConfigSchema.parse(process.env);
-    return config;
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      // Provide helpful error messages for missing/invalid config
-      console.error('❌ Configuration validation failed:');
-      error.errors.forEach(err => {
-        console.error(`  - ${err.path.join('.')}: ${err.message}`);
-      });
-      console.error('\n💡 Please check your .env file and ensure all required variables are set.');
-    } else {
-      console.error('❌ Failed to load configuration:', error);
-    }
-    process.exit(1);
-  }
+export interface Config {
+  readonly NODE_ENV: string;
+  readonly PORT: number;
+  readonly LOG_LEVEL: string;
+  readonly TODOIST_API_KEY: string;
+  readonly MCP_SERVER_NAME: string;
+  readonly MCP_SERVER_VERSION: string;
 }
 
-// Load and validate configuration once at startup
-export const config = loadConfig();
-
-// Export type for use in other files (TypeScript feature)
-export type Config = z.infer<typeof ConfigSchema>;
+/**
+ * Get environment variable with validation
+ */
+function getEnvVar(key: string, defaultValue?: string): string {
+  const value = process.env[key];
+  if (!value) {
+    if (defaultValue !== undefined) {
+      return defaultValue;
+    }
+    throw new Error(`Required environment variable ${key} is not set`);
+  }
+  return value;
+}
 
 /**
- * Utility function to check if we're in development mode
- * Useful for enabling development-specific features
+ * Get numeric environment variable with validation
  */
-export const isDevelopment = () => config.NODE_ENV === 'development';
+function getEnvNumber(key: string, defaultValue: number): number {
+  const value = process.env[key];
+  if (!value) {
+    return defaultValue;
+  }
+  const parsed = parseInt(value, 10);
+  if (isNaN(parsed)) {
+    throw new Error(`Environment variable ${key} must be a valid number, got: ${value}`);
+  }
+  return parsed;
+}
 
 /**
- * Utility function to check if we're in production mode
- * Useful for enabling production optimizations
+ * Create and validate configuration object
+ * This ensures config is never undefined and all required values exist
  */
-export const isProduction = () => config.NODE_ENV === 'production';
+function createConfig(): Config {
+  // Validate required environment variables exist
+  const todoistApiKey = getEnvVar('TODOIST_API_KEY');
+  
+  if (!todoistApiKey) {
+    throw new Error(
+      'TODOIST_API_KEY environment variable is required. ' +
+      'Please set it in your .env file or environment variables.'
+    );
+  }
 
-/**
- * Utility function to check if we're in test mode
- * Useful for test-specific configurations
- */
-export const isTest = () => config.NODE_ENV === 'test';
+  return {
+    NODE_ENV: getEnvVar('NODE_ENV', 'development'),
+    PORT: getEnvNumber('PORT', 3000),
+    LOG_LEVEL: getEnvVar('LOG_LEVEL', 'info'),
+    TODOIST_API_KEY: todoistApiKey,
+    MCP_SERVER_NAME: getEnvVar('MCP_SERVER_NAME', 'claude-todoist-api'),
+    MCP_SERVER_VERSION: getEnvVar('MCP_SERVER_VERSION', '1.0.0'),
+  } as const;
+}
+
+// Create configuration object - this will throw if invalid
+export const config: Config = createConfig();
+
+// Export utility functions
+export const isDevelopment = config.NODE_ENV === 'development';
+export const isProduction = config.NODE_ENV === 'production';
+export const isTesting = config.NODE_ENV === 'test';
