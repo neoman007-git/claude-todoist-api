@@ -1,34 +1,43 @@
 {
-  "name": "claude-todoist-mcp",
+  "name": "claude-todoist-api",
   "version": "1.0.0",
-  "description": "Scalable Todoist MCP Server for Claude AI",
-  "type": "module",
+  "description": "REST API server enabling Claude AI to manage Todoist tasks, projects, and labels. Built with TypeScript, Express, and Todoist API v2.",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc && chmod +x dist/index.js",
+    "build": "tsc",
     "start": "node dist/index.js",
-    "test": "vitest",
-    "test:watch": "vitest --watch",
-    "lint": "eslint src/**/*.ts",
-    "lint:fix": "eslint src/**/*.ts --fix",
     "type-check": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
     "@doist/todoist-ai": "^1.0.0",
-    "@modelcontextprotocol/sdk": "^1.17.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5", 
+    "helmet": "^7.1.0",
     "zod": "^3.22.4",
     "dotenv": "^16.3.1",
     "winston": "^3.11.0"
   },
   "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/cors": "^2.8.17",
     "@types/node": "^20.10.0",
-    "typescript": "^5.3.0",
     "tsx": "^4.6.0",
-    "eslint": "^8.55.0",
-    "@typescript-eslint/eslint-plugin": "^6.13.0",
-    "@typescript-eslint/parser": "^6.13.0",
-    "vitest": "^1.0.0"
-  }
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "todoist",
+    "api",
+    "claude",
+    "ai",
+    "task-management",
+    "typescript",
+    "express"
+  ],
+  "author": "neoman007",
+  "license": "MIT"
 }
