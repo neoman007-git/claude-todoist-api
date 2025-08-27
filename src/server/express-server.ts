@@ -47,15 +47,17 @@ export async function createExpressServer(): Promise<Application> {
     crossOriginEmbedderPolicy: false,
   }));
 
-  // CORS configuration - UPDATED TO ALLOW CLAUDE WEB
+  // CORS configuration - UPDATED WITH CORRECT CLAUDE DOMAINS
   app.use(cors({
     origin: config.NODE_ENV === 'production' ? [
       'https://claude.ai',
-      'https://claude.anthropic.com'
-    ] : true, // Allow Claude Web in production, everything in dev
+      'https://claude.anthropic.com',
+      'https://www.claudeusercontent.com',  // Analysis tool domain
+      'https://claudeusercontent.com'       // Alternative without www
+    ] : true, // Allow all in development
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: false, // Changed to false since Claude Web doesn't need credentials
+    credentials: false,
   }));
 
   // Body parsing middleware
